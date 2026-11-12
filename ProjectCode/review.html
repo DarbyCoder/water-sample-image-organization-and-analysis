@@ -53,21 +53,17 @@
       <section class="banner page-head" aria-labelledby="page-title">
         <canvas class="banner-fx" data-fx="plankton" aria-hidden="true"></canvas>
         <div class="banner-inner">
-          <p class="eyebrow">Blind review · demo</p>
+          <p class="eyebrow">Blind review</p>
           <h1 id="page-title">Review <em>labels</em></h1>
           <p class="lede">Pick a label for each image without seeing the one it was given. If you pick the same label, it becomes official. If you pick a different one, an admin decides.</p>
         </div>
         <div class="waves" aria-hidden="true"></div>
       </section>
 
-      <!-- Outside demo mode: blind review isn't on the real site yet -->
-      <section class="card setup-card" id="not-demo" hidden>
+      <!-- Shown instead of the review when you can't review (signed out, a viewer, or 006 isn't applied) -->
+      <section class="card setup-card" id="review-blocked" hidden>
         <svg class="icon" aria-hidden="true"><use href="icons.svg#i-eye-off"/></svg>
-        <div>
-          <h2>Blind review is only in the demo for now</h2>
-          <p>On the real site a label is official as soon as it’s applied. Try blind review on sample data in the demo. It saves nothing.</p>
-          <p><a class="btn btn-primary" href="review.html?demo"><svg class="icon" aria-hidden="true"><use href="icons.svg#i-sparkles"/></svg>Try blind review in the demo</a></p>
-        </div>
+        <div id="review-blocked-body"></div>
       </section>
 
       <div id="review-app" hidden>

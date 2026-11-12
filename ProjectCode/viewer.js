@@ -174,8 +174,9 @@
       if (locked) statusEl.appendChild(h('span', { class: 'viewer-locked' }, UI.icon('eye-off'), locked));
       else {
         statusEl.appendChild(Labels.chip(item.label));
-        if (item.review_status && item.review_status !== 'official' && item.label) statusEl.appendChild(h('span', { class: 'badge', text: item.review_status === 'disputed' ? 'Disputed' : 'In review' }));
-        if (item.label) statusEl.appendChild(h('span', { class: 'viewer-when', text: labelledBy(item) }));
+        var waiting = item.label && (item.review_status === 'in_review' || item.review_status === 'disputed');
+        if (waiting) statusEl.appendChild(h('span', { class: 'badge', text: item.review_status === 'disputed' ? 'Disputed' : 'In review' }));
+        if (item.label) statusEl.appendChild(h('span', { class: 'viewer-when', text: waiting ? 'waiting for another labeler' : labelledBy(item) }));
       }
       if (labelSection) labelSection.hidden = !!locked;
 

@@ -28,7 +28,7 @@ PROJECT_DIR = Path(__file__).resolve().parent.parent
 MIGRATIONS_DIR = PROJECT_DIR / "supabase" / "migrations"
 
 TABLES = ["folders", "images", "qa_log", "profiles", "measurement_columns", "role_requests",
-          "label_options"]
+          "label_options", "pending_labels"]
 VIEWS = ["folders_visible", "dashboard_stats", "chart_site_counts",
          "chart_date_counts", "chart_water_body_counts",
          "folder_labeling_progress", "labeling_stats", "label_counts"]
@@ -36,7 +36,10 @@ ROLE_FUNCTIONS = ["is_admin()", "admin_list_users()", "set_user_role(uuid, text)
                    "can_label()", "my_labeling_count()", "admin_labeling_by_user()",
                    "is_owner()", "request_role(text)", "cancel_role_request()",
                    "review_role_request(uuid, boolean)", "team_labeling_progress()",
-                   "admin_update_label(text, text, text)", "admin_delete_label(text)"]
+                   "admin_update_label(text, text, text)", "admin_delete_label(text)",
+                   "submit_labels(text[], text)", "folder_pending(text)", "review_queue(integer)",
+                   "review_counts()", "submit_review(text, text)", "disputed_list()",
+                   "resolve_dispute(text, text)", "make_label_official(text, text, uuid)"]
 
 
 def get_db_url() -> str:
@@ -138,6 +141,14 @@ def verify(conn: psycopg.Connection) -> bool:
                        "and tgrelid = 'public.images'::regclass").fetchone() is not None)
     builtin = conn.execute("select count(*) from public.label_options where is_builtin").fetchone()[0]
     check(f"label_options has the 12 starting labels (found {builtin})", builtin == 12)
+    check("nobody reads pending_labels directly (blind review)",
+          not priv("select has_table_privilege('anon', 'public.pending_labels', 'select')")
+          and not priv("select has_table_privilege('authenticated', 'public.pending_labels', 'select')"))
+    check("authenticated cannot execute make_label_official",
+          not priv("select has_function_privilege('authenticated', 'public.make_label_official(text, text, uuid)', 'execute')"))
+    check("only admins update images.label directly (006)",
+          conn.execute("select 1 from pg_policies where schemaname = 'public' and tablename = 'images' "
+                       "and policyname = 'Labelers can set the label'").fetchone() is None)
     for fn in ROLE_FUNCTIONS:
         check(f"anon cannot execute {fn}",
               not priv("select has_function_privilege('anon', %s, 'execute')", f"public.{fn}"))

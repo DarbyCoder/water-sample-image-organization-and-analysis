@@ -95,7 +95,7 @@ flowchart LR
     browser -->|"view and download images"| worker
 ```
 
-- **Dashboard** (`ProjectCode/index.html`, `labeling.html`, `review.html` (demo only), `admin.html`,
+- **Dashboard** (`ProjectCode/index.html`, `labeling.html`, `review.html`, `admin.html`,
   `reset-password.html`, `privacy.html`, `404.html`, their scripts and the shared
   `base.css`, `theme.js`, `ui.js`, `viewer.js`, ... -- see
   [Look and feel](#look-and-feel) and `ProjectCode/build.mjs` for the full list):
@@ -116,11 +116,12 @@ flowchart LR
   [Labeling](#labeling)); `003_measurements.sql` adds the FlowCam measurements
   (see [Particle measurements](#particle-measurements-flowcam)); `004_roles.sql` adds the
   Owner role and role requests; `005_label_options.sql` adds the shared label list
-  (see [Labeling](#labeling)). Security lives in the database (Row-Level Security and
+  and `006_blind_review.sql` blind review (see [Labeling](#labeling)). Security lives in the database (Row-Level Security and
   SQL functions), not in the page:
   - anyone can read folders, images and the QA log, and nobody can change them
-    through the website, except that labelers and admins can set the `label`
-    column of an image (and nothing else);
+    through the website, except that admins can set the `label` column of an
+    image (and nothing else), and labelers can submit labels for review
+    (`submit_labels()`, 006);
   - every account starts as `viewer`; `watersampleimageorganization@gmail.com`
     becomes `owner` on its first confirmed sign-in. The Owner can do everything an
     admin can; nobody can be made Owner, and the Owner's role can't be changed;
@@ -182,18 +183,32 @@ flowchart LR
 - `images.label` stores the label's name exactly as shown, and the database refuses
   a name that isn't on the list (`images_check_label` trigger).
 
-**Blind review (demo only for now).** In demo mode a labeler's label is *in
-review* until one other labeler picks the same label on the **Review** page
-(`review.html`) without seeing it, or an admin reviews it; then it's
+**Blind review** (`supabase/migrations/006_blind_review.sql`). A labeler's label
+is *in review* until one other labeler picks the same label on the **Review**
+page (`review.html`) without seeing it, or an admin reviews it; then it's
 *official*. A different pick makes it *disputed*, and an admin settles it on the
 Review page's Disputed tab. An admin's own label is official straight away.
-Labels in review are hidden (and locked) for everyone but the person who gave
-them and admins, so the review stays blind; changing a label starts its review
-over, and nobody reviews their own label. Progress counts official labels only,
-and the CSV export gains a `status` column. The demo pill's **Acting as** menu
-switches between sample labelers and an admin to try the whole loop. On the
-real site labels are still official as soon as they're applied, and
-`review.html` says so.
+
+- `images.label` only ever holds the official label, so the catalog, counts and
+  CSV export show official labels only. Labels from before 006 stay official.
+- Pending labels live in `pending_labels`, which nobody reads directly; the
+  functions show a pending label only to whoever gave it and to admins, so
+  other labelers see "In review" (hidden and locked) in the grid.
+- Labelers save through `submit_labels()`; only admins update `images.label`
+  directly. A labeler can propose a change to an official label (it stays
+  official until the change is confirmed) and withdraw their own pending
+  label, but only admins clear an official label. Changing a label starts its
+  review over, and nobody reviews their own label.
+- A confirmed label is credited (`labeled_by`) to the labeler, not the reviewer.
+- The reviewer is told the first label afterwards, never who gave it.
+- Folder progress counts pending labels as done (for labelers' to-do lists);
+  the overall ring counts official labels only.
+- Until 006 is applied, labels are official as soon as they're saved, and the
+  Review page says the database needs 006.
+
+Demo mode runs the same functions on sample data (`demo.js`), and the demo
+pill's **Acting as** menu switches between sample labelers and an admin to try
+the whole loop.
 
 Not set up yet, or want to show it off? Add `?demo` to any page's address
 (`labeling.html?demo`). Demo mode runs the catalog and labeling on sample data and

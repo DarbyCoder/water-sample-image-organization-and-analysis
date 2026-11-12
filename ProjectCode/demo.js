@@ -17,18 +17,19 @@
  *
  * The 45 folders below are a real sample of the catalog's folder names.
  *
- * Blind review (demo only for now): a labeler's label starts "in review" and
- * becomes "official" once one other labeler picks the same label on the
- * Review page without seeing it, or an admin reviews it. A different pick
- * makes it "disputed" for an admin to settle. An admin's own label is official
- * straight away. Labels in review are hidden from everyone but the person who
- * gave them (and admins), so the review stays blind. The pill's "Acting as"
- * menu switches between sample people, to play several labelers.
+ * Blind review works here exactly as 006_blind_review.sql has it on the real
+ * site: images.label is the official label only, and a labeler's label waits
+ * in a separate pending list until one other labeler picks the same label on
+ * the Review page without seeing it, or an admin reviews it. The functions
+ * below (submit_labels, folder_pending, review_queue, ...) answer like the
+ * real ones, so the pages run the same code in and out of the demo. The
+ * pill's "Acting as" menu switches between sample people, to play several
+ * labelers.
  */
 (function () {
   'use strict';
 
-  var FLAG = 'wsic-demo', DATA = 'wsic-demo-data-v2';  // v2: the label list of 005_label_options.sql
+  var FLAG = 'wsic-demo', DATA = 'wsic-demo-data-v3';  // v3: pending labels kept apart, as in 006_blind_review.sql
 
   function session(key, value) {
     try {
@@ -246,7 +247,10 @@
     return { name: l[0], category: l[1], is_builtin: true, created_by: null, created_at: '2026-09-01T12:00:00Z' };
   });
   var LABEL_CATEGORIES = ['cyanobacteria', 'other_significant', 'non_organism'];
-  stored.review = stored.review || {};   // image_id -> { status, reviews: [{ by, label, at }] }
+  // Pending labels (006): image_id -> { label, by, at, status, review_label, review_by, review_at }.
+  // The sample ones are made below; stored.pending holds changes (null: removed).
+  stored.pending = stored.pending || {};
+  var pending = {};
   stored.actAs = stored.actAs || null;   // a sample person's id, or null for you
   function labelOption(name) { return stored.labelOptions.filter(function (o) { return o.name === name; })[0] || null; }
   // user id -> latest role request; Riley starts with one waiting for review.
@@ -270,8 +274,6 @@
         width: spec.w, height: spec.h, file_size_bytes: Math.round(spec.w * spec.h * 1.1 + 900), format: 'PNG', mode: 'RGB',
         is_readable: true, source_dataset: 'demo', label: null, labeled_by: null, labeled_date: null,
       };
-      row.review_status = null;
-      row.reviews = [];
       if (r() < fraction) {
         var wrong = r() < 0.1;
         row.label = wrong ? ['Fragilaria', 'Microcystis Debris', 'Staurastrum', 'Unsure'][Math.floor(r() * 4)] : spec.truth;
@@ -279,18 +281,23 @@
         row.labeled_date = new Date(Date.now() - Math.floor(r() * 12 * 86400000) - 3600000).toISOString();
         // Most sample labels are already official; some wait for review, a few are disputed.
         var roll = r(), other = row.labeled_by === 'demo-labeler-2' ? 'demo-labeler-3' : 'demo-labeler-2';
-        row.review_status = roll < 0.55 ? 'official' : roll < 0.92 ? 'in_review' : 'disputed';
-        if (row.review_status === 'official') row.reviews = [{ by: other, label: row.label, at: row.labeled_date }];
-        if (row.review_status === 'disputed') {
-          var alt = ['Microcystis', 'Unsure', 'Fragilaria', 'Dolichospermum'].filter(function (x) { return x !== row.label; });
-          row.reviews = [{ by: other, label: alt[Math.floor(r() * alt.length)], at: row.labeled_date }];
+        if (roll >= 0.55) {
+          var p = { label: row.label, by: row.labeled_by, at: row.labeled_date, status: roll < 0.92 ? 'in_review' : 'disputed',
+            review_label: null, review_by: null, review_at: null };
+          if (p.status === 'disputed') {
+            var alt = ['Microcystis', 'Unsure', 'Fragilaria', 'Dolichospermum'].filter(function (x) { return x !== row.label; });
+            p.review_label = alt[Math.floor(r() * alt.length)]; p.review_by = other; p.review_at = row.labeled_date;
+          }
+          pending[row.image_id] = p;
+          row.label = null; row.labeled_by = null; row.labeled_date = null;
         }
       }
       var s = stored.labels[row.image_id];
       if (s) { row.label = s[0]; row.labeled_by = s[1]; row.labeled_date = s[2]; }
-      var rv = stored.review[row.image_id];
-      if (rv) { row.review_status = rv.status; row.reviews = rv.reviews; }
-      if (!row.label) { row.review_status = null; row.reviews = []; }
+      if (row.image_id in stored.pending) {
+        if (stored.pending[row.image_id]) pending[row.image_id] = stored.pending[row.image_id];
+        else delete pending[row.image_id];
+      }
       images.push(row);
     }
   });
@@ -385,27 +392,25 @@
       return Object.keys(m).map(function (k) { return { water_body_type: k, folder_count: m[k], image_count: 0 }; })
         .sort(function (a, b) { return b.folder_count - a.folder_count || a.water_body_type.localeCompare(b.water_body_type); });
     },
-    // With blind review, only official labels count as labeled.
+    // images.label is the official label, so these count official labels only.
     labeling_stats: function () {
       var labeled = images.filter(function (x) { return x.label; });
-      var official = labeled.filter(function (x) { return x.review_status === 'official'; });
       var who = new Set(labeled.map(function (x) { return x.labeled_by; }));
       var dates = labeled.map(function (x) { return x.labeled_date; }).sort();
       return [{
-        total_images: images.length, labeled_images: official.length, unlabeled_images: images.length - official.length,
-        pct_labeled: images.length ? Math.round(1000 * official.length / images.length) / 10 : 0,
+        total_images: images.length, labeled_images: labeled.length, unlabeled_images: images.length - labeled.length,
+        pct_labeled: images.length ? Math.round(1000 * labeled.length / images.length) / 10 : 0,
         labeler_count: who.size, last_labeled_at: dates.length ? dates[dates.length - 1] : null,
-        in_review_images: labeled.filter(function (x) { return x.review_status === 'in_review'; }).length,
-        disputed_images: labeled.filter(function (x) { return x.review_status === 'disputed'; }).length,
       }];
     },
     label_counts: function () {
-      var m = groupSum(images.filter(function (x) { return x.label && x.review_status === 'official'; }), function (x) { return x.label; }, function () { return 1; });
+      var m = groupSum(images.filter(function (x) { return x.label; }), function (x) { return x.label; }, function () { return 1; });
       return Object.keys(m).map(function (k) { return { label: k, image_count: m[k] }; })
         .sort(function (a, b) { return b.image_count - a.image_count || a.label.localeCompare(b.label); });
     },
+    // 006: a pending label on an unlabeled image counts as done here.
     folder_labeling_progress: function () {
-      var m = groupSum(images.filter(function (x) { return x.label; }), function (x) { return x.folder_name; }, function () { return 1; });
+      var m = groupSum(images.filter(function (x) { return x.label || pending[x.image_id]; }), function (x) { return x.folder_name; }, function () { return 1; });
       return folders.map(function (f) {
         var l = m[f.folder_name] || 0;
         return {
@@ -414,16 +419,7 @@
         };
       }).sort(function (a, b) { return a.folder_name.localeCompare(b.folder_name); });
     },
-    // Blind review: a label still in review (or disputed) is hidden from
-    // everyone but whoever gave it, and admins.
-    images: function () {
-      var me = actor().id;
-      if (isAdminRole(actorRole())) return images;
-      return images.map(function (x) {
-        if (!x.label || x.labeled_by === me || !x.review_status || x.review_status === 'official') return x;
-        return Object.assign({}, x, { label: null, label_hidden: true });
-      });
-    },
+    images: function () { return images; },
     // Like the real policy: admins read every request, anyone else only their own.
     role_requests: function () {
       var me = actor(), admin = isAdminRole(realRole());
@@ -558,24 +554,10 @@
     if (q.patch.label != null && !labelOption(q.patch.label)) {
       return { data: null, error: { message: 'Unknown label "' + q.patch.label + '"', code: '23503', hint: 'Add it with "Enter new label" first, or refresh the page.' }, count: null };
     }
-    var admin = isAdminRole(actorRole());
-    var rows = images.filter(function (r) { return q.filters.every(function (f) { return f(r); }); });
-    // Someone else's label in review is the reviewers' to judge, not yours to change.
-    if (!admin && rows.some(function (r) { return r.label && r.labeled_by !== me.id && (r.review_status === 'in_review' || r.review_status === 'disputed'); })) {
-      return err('That image is waiting for review, so only an admin can change its label', '42501');
-    }
-    rows.forEach(function (r) {
-      var value = q.patch.label == null ? null : q.patch.label;
-      if (value === r.label) return;
-      r.label = value;
-      r.labeled_by = value ? me.id : null;
-      r.labeled_date = value ? now : null;
-      // An admin's label is official at once; anyone else's (or a change) starts a fresh review.
-      r.review_status = value ? (admin ? 'official' : 'in_review') : null;
-      r.reviews = [];
-      stored.review[r.image_id] = { status: r.review_status, reviews: [] };
-      if (value) stored.labels[r.image_id] = [value, me.id, now];
-      else stored.labels[r.image_id] = [null, null, null];
+    // 006: only admins write images.label directly; labelers use submit_labels.
+    if (!isAdminRole(actorRole())) return { data: null, error: null, count: null };  // RLS: 0 rows, no error
+    images.filter(function (r) { return q.filters.every(function (f) { return f(r); }); }).forEach(function (r) {
+      setOfficial(r, q.patch.label == null ? null : q.patch.label, me.id);
     });
     persist();
     return { data: null, error: null, count: null };
@@ -611,6 +593,12 @@
       if (labelInUse(o.name)) return { data: null, error: { message: 'Images already use "' + o.name + '", so it can\'t be renamed', code: '22023', hint: 'You can still change its category.' } };
       if (labelOption(name)) return err('There is already a label called "' + name + '"', '23505');
     }
+    // Pending labels follow a rename (006: on update cascade).
+    Object.keys(pending).forEach(function (id) {
+      if (pending[id].label === o.name) pending[id].label = name;
+      if (pending[id].review_label === o.name) pending[id].review_label = name;
+      savePending(id);
+    });
     o.name = name;
     o.category = a.new_category;
     persist();
@@ -621,76 +609,124 @@
     var o = labelOption(a.label_name);
     if (!o) return err('No label called "' + a.label_name + '"', 'P0002');
     if (labelInUse(o.name)) return { data: null, error: { message: 'Images use "' + o.name + '", so it can\'t be deleted', code: '22023', hint: 'Relabel those images first.' } };
+    if (Object.keys(pending).some(function (id) { return pending[id].label === o.name || pending[id].review_label === o.name; })) {
+      return { data: null, error: { message: 'Labels waiting for review use "' + o.name + '", so it can\'t be deleted', code: '22023', hint: 'Review or settle those first.' } };
+    }
     stored.labelOptions = stored.labelOptions.filter(function (x) { return x !== o; });
     persist();
     return { data: null, error: null };
   }
 
-  // --- Blind review ----------------------------------------------------------------
+  // --- Blind review (006_blind_review.sql) -----------------------------------------------
 
-  function canReview(x, me) {
-    return x.review_status === 'in_review' && x.labeled_by !== me
-      && !x.reviews.some(function (rv) { return rv.by === me; });
+  function imageById(id) { return images.filter(function (i) { return i.image_id === id; })[0] || null; }
+  function savePending(id) { stored.pending[id] = pending[id] || null; }
+  // Make `value` the official label, credited to `by`, and drop any pending label.
+  function setOfficial(x, value, by) {
+    if (value !== x.label) {
+      x.label = value;
+      x.labeled_by = value ? by : null;
+      x.labeled_date = value ? new Date().toISOString() : null;
+      stored.labels[x.image_id] = [x.label, x.labeled_by, x.labeled_date];
+    }
+    delete pending[x.image_id];
+    savePending(x.image_id);
   }
   function blindRow(x) {
     return { image_id: x.image_id, folder_name: x.folder_name, filename: x.filename, relative_path: x.relative_path,
       width: x.width, height: x.height, file_size_bytes: x.file_size_bytes, format: x.format };
   }
-  function saveReview(x) { stored.review[x.image_id] = { status: x.review_status, reviews: x.reviews }; persist(); }
+  function pendingIds() { return Object.keys(pending); }
 
   var reviewRpc = {
-    // What this person can review: someone else's label, still in review, not yet reviewed by them.
+    submit_labels: function (a, me) {
+      var admin = isAdminRole(actorRole()), value = a.new_label == null ? null : a.new_label;
+      if (value != null && !labelOption(value)) return { error: ['Unknown label "' + value + '"', '23503'] };
+      if (failRate && Math.random() < failRate) return { error: ['Simulated network failure (demo ?fail=' + failRate + ')', 'DEMO_FAIL'] };
+      var out = (a.image_ids || []).map(function (id) {
+        var x = imageById(id), p = pending[id], outcome;
+        if (!x) return { target: id, outcome: 'missing' };
+        if (admin) {
+          outcome = value === x.label && !p ? 'unchanged' : value == null ? 'cleared' : 'official';
+          setOfficial(x, value, me.id);
+        } else if (p && p.by !== me.id) outcome = 'locked';
+        else if (value == null || value === x.label) {
+          if (p) { delete pending[id]; savePending(id); outcome = 'withdrawn'; }
+          else outcome = value == null && x.label ? 'not_allowed' : 'unchanged';
+        } else if (p && p.label === value && p.status === 'in_review') outcome = 'unchanged';
+        else {
+          pending[id] = { label: value, by: me.id, at: new Date().toISOString(), status: 'in_review', review_label: null, review_by: null, review_at: null };
+          savePending(id);
+          outcome = 'in_review';
+        }
+        return { target: id, outcome: outcome };
+      });
+      persist();
+      return out;
+    },
+    // A pending label is shown only to whoever gave it, and to admins.
+    folder_pending: function (a, me) {
+      var admin = isAdminRole(actorRole());
+      return images.filter(function (x) { return x.folder_name === a.folder && pending[x.image_id]; }).map(function (x) {
+        var p = pending[x.image_id];
+        return { image_id: x.image_id, status: p.status, label: p.by === me.id || admin ? p.label : null, is_mine: p.by === me.id };
+      });
+    },
     review_queue: function (a, me) {
-      return images.filter(function (x) { return canReview(x, me.id); })
-        .sort(function (x, y) { return String(x.labeled_date).localeCompare(String(y.labeled_date)); })
-        .map(blindRow);
+      return pendingIds().filter(function (id) { return pending[id].status === 'in_review' && pending[id].by !== me.id; })
+        .sort(function (x, y) { return String(pending[x].at).localeCompare(String(pending[y].at)) || x.localeCompare(y); })
+        .slice(0, a.max_rows || 200)
+        .map(function (id) { return blindRow(imageById(id)); });
     },
     review_counts: function (a, me) {
-      var labeled = images.filter(function (x) { return x.label; });
+      var ids = pendingIds();
+      var n = function (f) { return ids.filter(function (id) { return f(pending[id]); }).length; };
       return {
-        to_review: labeled.filter(function (x) { return canReview(x, me.id); }).length,
-        in_review: labeled.filter(function (x) { return x.review_status === 'in_review'; }).length,
-        disputed: labeled.filter(function (x) { return x.review_status === 'disputed'; }).length,
-        official: labeled.filter(function (x) { return x.review_status === 'official'; }).length,
-        mine_waiting: labeled.filter(function (x) { return x.labeled_by === me.id && x.review_status === 'in_review'; }).length,
+        to_review: n(function (p) { return p.status === 'in_review' && p.by !== me.id; }),
+        in_review: n(function (p) { return p.status === 'in_review'; }),
+        disputed: n(function (p) { return p.status === 'disputed'; }),
+        official: images.filter(function (x) { return x.label; }).length,
+        mine_waiting: n(function (p) { return p.status === 'in_review' && p.by === me.id; }),
       };
     },
-    // A match makes it official; a different pick makes it disputed. An admin's pick is final.
+    // A match makes it official (credited to the labeler); a different pick makes it disputed.
+    // An admin's pick is final. The answer never says who gave the first label.
     submit_review: function (a, me) {
-      var x = images.filter(function (i) { return i.image_id === a.target; })[0];
-      if (!x || x.review_status !== 'in_review') return { error: ['This image isn’t waiting for review any more', 'P0002'] };
-      if (x.labeled_by === me.id) return { error: ['You can’t review your own label', '42501'] };
-      if (x.reviews.some(function (rv) { return rv.by === me.id; })) return { error: ['You’ve already reviewed this image', '22023'] };
+      var x = imageById(a.target), p = pending[a.target];
       if (!labelOption(a.chosen)) return { error: ['Unknown label "' + a.chosen + '"', '23503'] };
-      var first = x.label, admin = isAdminRole(actorRole()), outcome;
-      x.reviews.push({ by: me.id, label: a.chosen, at: new Date().toISOString() });
-      if (admin) { outcome = a.chosen === first ? 'official' : 'corrected'; x.label = a.chosen; x.review_status = 'official'; }
-      else if (a.chosen === first) { outcome = 'official'; x.review_status = 'official'; }
-      else { outcome = 'disputed'; x.review_status = 'disputed'; }
-      stored.labels[x.image_id] = [x.label, x.labeled_by, x.labeled_date];
-      saveReview(x);
-      // The first label, but not who gave it: reviewers never learn whose label they judged.
-      return { data: { outcome: outcome, first_label: first } };
+      if (!x || !p || p.status !== 'in_review') return { error: ['This image isn’t waiting for review any more', 'P0002'] };
+      if (p.by === me.id) return { error: ['You can’t review your own label', '42501'] };
+      var outcome;
+      if (isAdminRole(actorRole())) {
+        outcome = a.chosen === p.label ? 'official' : 'corrected';
+        setOfficial(x, a.chosen, a.chosen === p.label ? p.by : me.id);
+      } else if (a.chosen === p.label) {
+        outcome = 'official';
+        setOfficial(x, a.chosen, p.by);
+      } else {
+        outcome = 'disputed';
+        p.status = 'disputed'; p.review_label = a.chosen; p.review_by = me.id; p.review_at = new Date().toISOString();
+        savePending(a.target);
+      }
+      persist();
+      return { data: { outcome: outcome, first_label: p.label } };
     },
     // Admins only: both labels and who gave them.
     disputed_list: function (a, me) {
       if (!isAdminRole(actorRole())) return { error: ['Only admins can settle disputes', '42501'] };
-      return images.filter(function (x) { return x.label && x.review_status === 'disputed'; }).map(function (x) {
-        var rv = x.reviews[x.reviews.length - 1] || {};
-        return Object.assign(blindRow(x), { first_label: x.label, first_by: personName(x.labeled_by), first_at: x.labeled_date,
-          review_label: rv.label || null, review_by: rv.by ? personName(rv.by) : null, review_at: rv.at || null });
+      return pendingIds().filter(function (id) { return pending[id].status === 'disputed'; }).map(function (id) {
+        var p = pending[id];
+        return Object.assign(blindRow(imageById(id)), { first_label: p.label, first_by: personName(p.by), first_at: p.at,
+          review_label: p.review_label, review_by: p.review_by ? personName(p.review_by) : null, review_at: p.review_at });
       });
     },
     resolve_dispute: function (a, me) {
       if (!isAdminRole(actorRole())) return { error: ['Only admins can settle disputes', '42501'] };
-      var x = images.filter(function (i) { return i.image_id === a.target; })[0];
-      if (!x || x.review_status !== 'disputed') return { error: ['This image isn’t disputed any more', 'P0002'] };
       if (!labelOption(a.chosen)) return { error: ['Unknown label "' + a.chosen + '"', '23503'] };
-      x.label = a.chosen;
-      x.review_status = 'official';
-      x.reviews.push({ by: me.id, label: a.chosen, at: new Date().toISOString() });
-      stored.labels[x.image_id] = [x.label, x.labeled_by, x.labeled_date];
-      saveReview(x);
+      var x = imageById(a.target), p = pending[a.target];
+      if (!x || !p || p.status !== 'disputed') return { error: ['This image isn’t disputed any more', 'P0002'] };
+      setOfficial(x, a.chosen, a.chosen === p.label ? p.by : a.chosen === p.review_label ? p.review_by : me.id);
+      persist();
       return { data: null };
     },
   };
@@ -844,7 +880,6 @@
     guest: GUEST,  // who labels when no one is signed in
     // Who is acting now (a sample person, you, or the guest), with their demo role.
     actor: function () { var u = actor(); return { id: u.id, email: u.email || null, full_name: u.full_name || (u === GUEST ? 'Guest' : null), role: actorRole() }; },
-    reviewMode: true,
     truth: function (relPath) { return specimen(relPath).truth; },
     reset: function () { session(DATA, null); location.reload(); },
     exit: function () { session(FLAG, null); session(DATA, null); },

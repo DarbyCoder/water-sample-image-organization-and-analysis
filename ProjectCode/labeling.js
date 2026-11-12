@@ -22,9 +22,12 @@
  *
  * The label list (shared, in the database) and the type-ahead box live in labels.js.
  *
- * Demo mode adds blind review (demo.js): a labeler's label starts "in review",
- * other people's labels in review are hidden and locked here (they're judged
- * on review.html), and the progress counts official labels only.
+ * Blind review (supabase/migrations/006_blind_review.sql; demo.js answers the
+ * same way): images.label is the official label. A labeler's label is saved
+ * through submit_labels() as "in review" until another labeler confirms it on
+ * review.html; an admin's is official at once. Other people's labels in review
+ * are hidden and locked here, and the progress counts official labels only.
+ * Without 006 applied, labels are official as soon as they're saved, as before.
  */
 (function () {
   'use strict';
@@ -32,8 +35,7 @@
   const h = UI.h;
   const DB_PAGE_SIZE = 1000;   // PostgREST's per-request row cap
   const BATCH_SIZE = 200;      // ids per UPDATE request (image_id is a 16-char hex string)
-  const IMAGE_COLUMNS = 'image_id, filename, relative_path, width, height, file_size_bytes, format, label, labeled_by, labeled_date'
-    + (window.APP_DEMO ? ', review_status, label_hidden' : '');  // blind review is in the demo only
+  const IMAGE_COLUMNS = 'image_id, filename, relative_path, width, height, file_size_bytes, format, label, labeled_by, labeled_date';
   const fmt = (n) => Number(n).toLocaleString();
   const $ = (id) => document.getElementById(id);
 
@@ -68,7 +70,8 @@
     celebrated: new Set(),
     rerenderTimer: null,
     pinnedId: null,         // with nothing selected, the image the label panel acts on
-    reviewMode: false,      // demo: blind review is on
+    reviewMode: false,      // blind review is on (006 applied, or the demo)
+    reviewCounts: null,     // review_counts(): in_review, disputed, to_review, ...
     isAdmin: false,
   };
 
@@ -126,6 +129,7 @@
       fetchAll(() => sb.from('folder_labeling_progress').select('folder_name, image_count, labeled_count, unlabeled_count, pct_labeled')),
       fetchAll(() => sb.from('folders_visible').select('folder_name, site_normalized, date, sample_date, sample_code, capture_mode, is_pp')),
       state.user ? sb.rpc('my_labeling_count') : Promise.resolve({ data: 0, error: null }),
+      loadReviewCounts(),
     ]);
     const byName = new Map(meta.map(m => [m.folder_name, m]));
     state.stats = statsRes.data;
@@ -144,6 +148,19 @@
     if (state.currentFolder) state.currentFolder = state.folders.find(f => f.folder_name === state.currentFolder.folder_name) || state.currentFolder;
   }
 
+  // Blind review is on when review_counts() exists (006) and this person can label.
+  async function loadReviewCounts() {
+    if (!state.canLabel || !state.user) { state.reviewMode = false; state.reviewCounts = null; return; }
+    const { data, error } = await sb.rpc('review_counts');
+    if (error) {
+      if (!isMissingSchema(error)) console.error('Couldn’t load the review counts:', error);
+      state.reviewMode = false; state.reviewCounts = null;
+      return;
+    }
+    state.reviewMode = true;
+    state.reviewCounts = data;
+  }
+
   // 2. Boot and accounts -------------------------------------------------------------------
 
   let lastAuthKey = null;
@@ -160,7 +177,6 @@
     state.user = demo ? actor : auth.user;
     state.role = demo ? actor.role : auth.user ? role : 'viewer';
     state.canLabel = demo || (!!auth.user && ['owner', 'admin', 'labeler'].includes(role));
-    state.reviewMode = demo && !!Demo.reviewMode;
     state.isAdmin = ['owner', 'admin'].includes(state.role);
     renderRoleBanner();
     if (!state.booted) await boot();
@@ -265,9 +281,10 @@
     const stats = $('progress-stats');
     stats.innerHTML = '';
     stats.append(h('strong', { text: fmt(labeled) }), ` of ${fmt(total)} images ${state.reviewMode ? 'officially ' : ''}labeled`);
-    if (state.reviewMode && s.in_review_images != null) {
-      stats.append(' · ', h('strong', { text: fmt(s.in_review_images) }), ' in review');
-      if (Number(s.disputed_images)) stats.append(' · ', h('strong', { text: fmt(s.disputed_images) }), ' disputed');
+    const rc = state.reviewCounts;
+    if (state.reviewMode && rc) {
+      stats.append(' · ', h('strong', { text: fmt(rc.in_review) }), ' in review');
+      if (Number(rc.disputed)) stats.append(' · ', h('strong', { text: fmt(rc.disputed) }), ' disputed');
       stats.append(' · ', h('a', { href: 'review.html', text: 'Open the review queue' }));
     }
     if (state.user) stats.append(' · you’ve labeled ', h('strong', { text: fmt(state.myCount) }));
@@ -311,12 +328,13 @@
     btn.disabled = true;
     const toast = UI.toast({ message: 'Preparing your CSV…', kind: 'info', sticky: true, id: 'export' });
     try {
-      const rows = await fetchAll(() => sb.from('images').select('image_id, folder_name, filename, label, labeled_date' + (state.reviewMode ? ', review_status' : ''))
+      const rows = await fetchAll(() => sb.from('images').select('image_id, folder_name, filename, label, labeled_date')
         .not('label', 'is', null).order('folder_name').order('filename'));
       toast.dismiss(true);
       if (!rows.length) { UI.toast({ message: 'Nothing has been labeled yet, so there’s nothing to export.', kind: 'info' }); return; }
-      rows.forEach(r => { r.category = Labels.category(r.label).key || ''; r.status = r.review_status || 'official'; });
-      const text = UI.csv(rows, ['image_id', 'folder_name', 'filename', 'label', 'category'].concat(state.reviewMode ? ['status'] : [], ['labeled_date']));
+      // images.label holds official labels only, so that's what this exports.
+      rows.forEach(r => { r.category = Labels.category(r.label).key || ''; });
+      const text = UI.csv(rows, ['image_id', 'folder_name', 'filename', 'label', 'category', 'labeled_date']);
       UI.download(`water-sample-labels-${new Date().toISOString().slice(0, 10)}.csv`, text);
       UI.toast({ message: `Exported ${fmt(rows.length)} labels.`, kind: 'success' });
     } catch (err) {
@@ -428,9 +446,26 @@
     }
 
     try {
-      const images = await fetchFolderImages(name);
+      const [images, pendingRows] = await Promise.all([
+        fetchFolderImages(name),
+        state.reviewMode ? sb.rpc('folder_pending', { folder: name }).then(r => { if (r.error) throw r.error; return r.data || []; }) : Promise.resolve([]),
+      ]);
       if (seq !== state.loadSeq) return;
-      images.forEach(i => { i._folder = f; });
+      images.forEach(i => {
+        i._folder = f;
+        i.official_label = i.label || null;
+        i.review_status = i.label ? 'official' : null;
+        i.label_hidden = false;
+      });
+      // Pending labels: yours (or, for admins, everyone's) show; others' are hidden and locked.
+      const byIdNow = new Map(images.map(i => [i.image_id, i]));
+      pendingRows.forEach(p => {
+        const img = byIdNow.get(p.image_id);
+        if (!img) return;
+        img.review_status = p.status;
+        if (p.label) img.label = p.label;
+        else img.label_hidden = true;
+      });
       state.images = images;
       state.byId = new Map(images.map(i => [i.image_id, i]));
       // the server's count is the truth; keep the rail in step with what we actually loaded
@@ -884,71 +919,99 @@
     if (state.undoStack.length > 30) state.undoStack.shift();
   }
 
-  // The review status a new label gets: official, unless blind review (demo)
-  // needs someone else to confirm it.
-  function statusFor(value) {
-    if (!value) return null;
-    return state.reviewMode && !state.isAdmin ? 'in_review' : 'official';
+  // An image's label state: what this person sees (label), the official label,
+  // and the review status (official, in_review, disputed, or null).
+  function viewOf(img) {
+    return { label: img.label || null, official: img.official_label !== undefined ? img.official_label || null : img.label || null,
+      status: img.review_status || (img.label ? 'official' : null), hidden: !!img.label_hidden };
   }
 
-  // Updates the counters as one image's label moves from its current value to
-  // `next` (with review status nextStatus). Only official labels count as labeled.
-  function bump(img, next, nextBy, nextStatus) {
-    const prev = img.label || null;
-    const prevStatus = prev ? (state.reviewMode ? img.review_status || 'official' : 'official') : null;
+  // What labeling an image `value` (null: clear) leads to. Admins (and every
+  // label without blind review) are official at once. A labeler's label waits
+  // for review; picking the official label again, or clearing, withdraws it.
+  function nextView(img, value) {
+    if (!state.reviewMode || state.isAdmin) return { label: value, official: value, status: value ? 'official' : null, hidden: false };
+    const cur = viewOf(img);
+    if (value === null || value === cur.official) return { label: cur.official, official: cur.official, status: cur.official ? 'official' : null, hidden: false };
+    return { label: value, official: cur.official, status: 'in_review', hidden: false };
+  }
+
+  const isPendingStatus = (st) => st === 'in_review' || st === 'disputed';
+  const hasAny = (v) => !!(v.label || v.hidden || v.official);
+
+  // Keeps the counters in step as an image moves from one label state to another.
+  // Only official labels count as labeled overall; any label counts for the folder.
+  function bump(img, prev, next, by) {
     const s = state.stats;
-    const prevOfficial = prevStatus === 'official', nextOfficial = nextStatus === 'official';
-    if (!prevOfficial && nextOfficial) { s.labeled_images = Number(s.labeled_images) + 1; s.unlabeled_images = Number(s.unlabeled_images) - 1; }
-    if (prevOfficial && !nextOfficial) { s.labeled_images = Number(s.labeled_images) - 1; s.unlabeled_images = Number(s.unlabeled_images) + 1; }
-    s.pct_labeled = Number(s.total_images) ? Math.round((1000 * Number(s.labeled_images)) / Number(s.total_images)) / 10 : 0;
-    ['in_review', 'disputed'].forEach(st => {
-      const k = `${st}_images`;
-      if (s[k] == null) return;
-      if (prevStatus === st) s[k] = Math.max(0, Number(s[k]) - 1);
-      if (nextStatus === st) s[k] = Number(s[k]) + 1;
-    });
-    if (prev && prevOfficial) state.counts.set(prev, Math.max(0, (state.counts.get(prev) || 0) - 1));
-    if (next && nextOfficial) state.counts.set(next, (state.counts.get(next) || 0) + 1);
-    const me = state.user && state.user.id;
-    if (prev && img.labeled_by === me) state.myCount = Math.max(0, state.myCount - 1);
-    if (next && nextBy === me) state.myCount += 1;
+    if (prev.official !== next.official) {
+      if (!prev.official && next.official) { s.labeled_images = Number(s.labeled_images) + 1; s.unlabeled_images = Number(s.unlabeled_images) - 1; }
+      if (prev.official && !next.official) { s.labeled_images = Number(s.labeled_images) - 1; s.unlabeled_images = Number(s.unlabeled_images) + 1; }
+      s.pct_labeled = Number(s.total_images) ? Math.round((1000 * Number(s.labeled_images)) / Number(s.total_images)) / 10 : 0;
+      if (prev.official) state.counts.set(prev.official, Math.max(0, (state.counts.get(prev.official) || 0) - 1));
+      if (next.official) state.counts.set(next.official, (state.counts.get(next.official) || 0) + 1);
+      const me = state.user && state.user.id;
+      if (prev.official && img.labeled_by === me) state.myCount = Math.max(0, state.myCount - 1);
+      if (next.official && by === me) state.myCount += 1;
+    }
+    const rc = state.reviewCounts;
+    if (rc) {
+      if (isPendingStatus(prev.status)) rc[prev.status] = Math.max(0, Number(rc[prev.status]) - 1);
+      if (isPendingStatus(next.status)) rc[next.status] = Number(rc[next.status]) + 1;
+    }
     const f = img._folder || state.currentFolder;
     if (f) {
-      if (!prev && next) f.labeled_count += 1;
-      if (prev && !next) f.labeled_count = Math.max(0, f.labeled_count - 1);
+      if (!hasAny(prev) && hasAny(next)) f.labeled_count += 1;
+      if (hasAny(prev) && !hasAny(next)) f.labeled_count = Math.max(0, f.labeled_count - 1);
     }
   }
 
-  function setImageLabel(img, value, by, date, status) {
-    const st = status !== undefined ? status : statusFor(value);
-    bump(img, value, by, st);
-    img.label = value || null;
-    img.labeled_by = value ? by : null;
-    img.labeled_date = value ? date : null;
-    if (state.reviewMode) img.review_status = value ? st : null;
+  // Moves an image to label state `next`. by/date credit an official label that changed.
+  function applyView(img, next, by, date) {
+    const prev = viewOf(img);
+    bump(img, prev, next, by);
+    if (prev.official !== next.official) {
+      img.labeled_by = next.official ? by : null;
+      img.labeled_date = next.official ? date : null;
+    }
+    img.label = next.label;
+    img.official_label = next.official;
+    img.review_status = next.status;
+    img.label_hidden = next.hidden;
   }
+
+  const sameView = (a, b) => a.label === b.label && a.official === b.official && a.status === b.status && a.hidden === b.hidden;
 
   // Apply `value` (or null to clear) to images; returns the images that actually changed.
   function applyLabel(images, value, opts) {
     opts = opts || {};
     if (!state.canLabel || !state.user) return [];
     value = value || null;
+    let explained = false;  // a reason was already shown, so no "Nothing to clear" on top
     const locked = images.filter(isLocked);
     if (locked.length) {
       images = images.filter(img => !isLocked(img));
       if (!opts.quiet) UI.toast({ id: 'locked', message: `Skipped ${fmt(locked.length)} ${locked.length === 1 ? 'image' : 'images'} waiting for review.`, kind: 'info', duration: 3000 });
+      explained = true;
     }
-    const changing = images.filter(img => (img.label || null) !== value);
+    // Labelers can withdraw their own label in review, but only admins clear an official one.
+    if (value === null && state.reviewMode && !state.isAdmin) {
+      const official = images.filter(img => viewOf(img).status === 'official');
+      if (official.length) {
+        images = images.filter(img => viewOf(img).status !== 'official');
+        if (!opts.quiet) UI.toast({ id: 'locked', message: `Only an admin can clear an official label (${fmt(official.length)} skipped).`, kind: 'info', duration: 3500 });
+        explained = true;
+      }
+    }
+    const changing = images.filter(img => !sameView(viewOf(img), nextView(img, value)));
     if (!changing.length) {
-      if (!opts.quiet) UI.toast({ message: value ? `Already labeled ${Labels.text(value)}.` : 'Nothing to clear.', kind: 'info', duration: 2200 });
+      if (!opts.quiet && !explained) UI.toast({ message: value ? `Already labeled ${Labels.text(value)}.` : 'Nothing to clear.', kind: 'info', duration: 2200 });
       return [];
     }
     const me = state.user.id, now = new Date().toISOString();
-    const snapshot = changing.map(img => ({ img, label: img.label || null, by: img.labeled_by || null, date: img.labeled_date || null,
-      status: img.label ? (state.reviewMode ? img.review_status || 'official' : 'official') : null }));
+    const snapshot = changing.map(img => Object.assign({ img, by: img.labeled_by || null, date: img.labeled_date || null }, viewOf(img)));
     const entry = { snapshot, value, failed: false };
     if (opts.record !== false) pushUndo(entry);
-    changing.forEach(img => setImageLabel(img, value, me, now));
+    changing.forEach(img => applyView(img, nextView(img, value), me, now));
 
     afterChange(changing, value, opts);
     enqueueSave(changing, value, snapshot, entry);
@@ -983,7 +1046,9 @@
       const n = changed.length;
       UI.toast({
         id: 'label', kind: 'success', duration: 6000,
-        message: value ? `Labeled ${fmt(n)} ${n === 1 ? 'image' : 'images'} as ${Labels.text(value)}` : `Cleared the label on ${fmt(n)} ${n === 1 ? 'image' : 'images'}`,
+        message: value
+          ? `Labeled ${fmt(n)} ${n === 1 ? 'image' : 'images'} as ${Labels.text(value)}${state.reviewMode && !state.isAdmin ? ' (waiting for review)' : ''}`
+          : `Cleared the label on ${fmt(n)} ${n === 1 ? 'image' : 'images'}`,
         action: { label: 'Undo', onClick: () => undo() },
       });
     }
@@ -1016,11 +1081,23 @@
     state.queue = state.queue.then(async () => {
       let saved = 0;
       try {
+        const refused = [];
         for (let i = 0; i < ids.length; i += BATCH_SIZE) {
           const batch = ids.slice(i, i + BATCH_SIZE);
-          const { error } = await sb.from('images').update({ label: value }).in('image_id', batch);
-          if (error) throw error;
+          if (state.reviewMode) {
+            // 006: one row per image; a few can be refused (someone else's label in review).
+            const { data, error } = await sb.rpc('submit_labels', { image_ids: batch, new_label: value });
+            if (error) throw error;
+            (data || []).forEach(r => { if (['locked', 'not_allowed', 'missing'].includes(r.outcome)) refused.push(r.target); });
+          } else {
+            const { error } = await sb.from('images').update({ label: value }).in('image_id', batch);
+            if (error) throw error;
+          }
           saved = i + batch.length;
+        }
+        if (refused.length) {
+          revert(snapshot.filter(s => refused.includes(s.img.image_id)), {
+            message: `${refused.length === 1 ? 'that image is' : 'those images are'} waiting for someone else’s review, or only an admin can change them`, code: 'REFUSED' });
         }
       } catch (err) {
         entry.failed = true;
@@ -1033,7 +1110,10 @@
   }
 
   function revert(snapshot, err) {
-    snapshot.forEach(s => setImageLabel(s.img, s.label, s.by, s.date, s.status));
+    snapshot.forEach(s => {
+      applyView(s.img, { label: s.label, official: s.official, status: s.status, hidden: s.hidden }, s.by, s.date);
+      s.img.labeled_by = s.by; s.img.labeled_date = s.date;
+    });
     snapshot.forEach(s => { const tile = tileEls.get(s.img.image_id); if (tile) paintTile(tile, s.img); });
     const f = state.currentFolder;
     renderFolderHeader();

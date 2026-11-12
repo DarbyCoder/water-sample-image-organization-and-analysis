@@ -1,15 +1,15 @@
 /**
- * Blind review (review.html) -- demo mode only for now.
+ * Blind review (review.html).
  *
  * A labeler's label waits "in review" until one other labeler picks the same
  * label here without seeing it, or an admin reviews it; then it's official.
  * A different pick makes it "disputed", and an admin settles it on the
  * Disputed tab. An admin's own label is official straight away.
  *
- * The rules live with the data, in demo.js (review_queue, review_counts,
- * submit_review, disputed_list, resolve_dispute), the way a database migration
- * would hold them once this moves to the real site. Outside the demo this page
- * only says so.
+ * The rules live in the database (supabase/migrations/006_blind_review.sql:
+ * review_queue, review_counts, submit_review, disputed_list, resolve_dispute);
+ * demo.js answers the same calls on sample data. Signed-in labelers and admins
+ * can review; anyone else is told what they need.
  */
 (function () {
   'use strict';
@@ -40,15 +40,43 @@
 
   // 1. Loading -----------------------------------------------------------------
 
-  async function boot() {
-    if (!window.APP_DEMO) { $('not-demo').hidden = false; return; }
-    state.actor = Demo.actor();
-    state.isAdmin = ['owner', 'admin'].includes(state.actor.role);
+  let lastKey = null;
+
+  // Who is reviewing: the demo's acting person, or your account and its role.
+  async function boot(auth) {
+    const role = (auth && auth.profile && auth.profile.role) || 'viewer';
+    const actor = window.APP_DEMO ? Demo.actor()
+      : auth && auth.user ? { id: auth.user.id, role } : null;
+    const key = actor ? `${actor.id}|${actor.role}` : 'anon';
+    if (key === lastKey) return;
+    lastKey = key;
+    state.actor = actor;
+    state.isAdmin = !!actor && ['owner', 'admin'].includes(actor.role);
+    if (!window.sb) return blocked('Couldn’t reach the database', 'The Supabase library didn’t load. Reload the page.');
+    if (!actor) return blocked('Sign in to review labels', 'Blind review is for labelers and admins.', h('button', { type: 'button', class: 'btn btn-primary', onclick: () => Auth.openSignIn('signin') }, UI.icon('log-in'), 'Sign in'));
+    if (!['owner', 'admin', 'labeler'].includes(actor.role)) {
+      return blocked('Reviewing needs the labeler role', 'Your account can browse but not label or review. Ask for the labeler role on the Admin page.',
+        h('a', { class: 'btn btn-primary', href: 'admin.html' }, UI.icon('shield'), 'Request the labeler role'));
+    }
+    $('review-blocked').hidden = true;
     $('review-app').hidden = false;
     $('tab-disputed').hidden = !state.isAdmin;
+    if (!state.isAdmin && state.tab === 'disputed') state.tab = 'review';
     await Labels.ready;
     await reload();
   }
+
+  function blocked(title, text, action) {
+    $('review-app').hidden = true;
+    const body = $('review-blocked-body');
+    body.innerHTML = '';
+    body.append(h('h2', { text: title }), h('p', { text }));
+    if (action) body.appendChild(h('p', {}, action));
+    if (!window.APP_DEMO) body.appendChild(h('p', { class: 'text-muted' }, 'Or try it on sample data in the ', h('a', { href: 'review.html?demo', text: 'demo' }), '.'));
+    $('review-blocked').hidden = false;
+  }
+
+  const isMissingSchema = (err) => /PGRST202|PGRST205|schema cache|does not exist|Could not find/i.test(`${err && err.code} ${err && err.message}`);
 
   async function reload() {
     try {
@@ -64,6 +92,10 @@
       renderCounts();
       renderTab();
     } catch (err) {
+      if (isMissingSchema(err)) {
+        return blocked('Blind review isn’t switched on for this site yet',
+          'The database needs supabase/migrations/006_blind_review.sql. Whoever holds the database password can add it with: python deploy/apply_migrations.py');
+      }
       $('panel-review').innerHTML = '';
       $('panel-review').appendChild(h('div', { class: 'alert alert-error', role: 'alert' }, UI.icon('alert'),
         h('div', { class: 'alert-body' }, h('strong', { text: 'Couldn’t load the review queue.' }), h('p', { text: err.message || String(err) }))));
@@ -112,9 +144,10 @@
     if (!item) {
       panel.appendChild(h('div', { class: 'empty-state review-empty' }, UI.icon('check-circle'),
         h('strong', { text: 'Nothing for you to review right now' }),
-        h('span', { text: state.counts && state.counts.mine_waiting
-          ? `${fmt(state.counts.mine_waiting)} of your labels are waiting for someone else. In the demo, switch “Acting as” (bottom of the page) to another labeler to review them.`
-          : 'New labels from other labelers show up here. In the demo, switch “Acting as” (bottom of the page) to play someone else.' }),
+        h('span', { text: (state.counts && state.counts.mine_waiting
+          ? `${fmt(state.counts.mine_waiting)} of your labels are waiting for another labeler. `
+          : 'New labels from other labelers show up here. ')
+          + (window.APP_DEMO ? 'In the demo, switch “Acting as” (bottom of the page) to play someone else.' : '') }),
         h('a', { class: 'btn btn-sm', href: 'labeling.html' }, UI.icon('tag'), 'Go to labeling')));
       return;
     }
@@ -185,10 +218,12 @@
     }
   }
 
+  // The queue comes 200 at a time, oldest first; fetch more once these are done.
   function next() {
     const done = state.result && state.result.id;
     state.result = null;
     if (done) state.queue = state.queue.filter(r => r.image_id !== done);
+    if (!state.queue.length && state.counts && state.counts.to_review > 0) { reload(); return; }
     if (state.index >= state.queue.length) state.index = 0;
     renderReview();
   }
@@ -279,6 +314,6 @@
       e.preventDefault();
       next();
     });
-    Auth.ready.then(() => boot());
+    Auth.ready.then((auth) => { boot(auth); Auth.onChange(boot); });
   });
 })();
