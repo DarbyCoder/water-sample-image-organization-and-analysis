@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Design mockup: similar images shown as stacks of cards in the labeling workspace.">
+  <meta name="theme-color" content="#eef4f2">
+  <title>Stacks Mockup — Water Sample Image Catalog</title>
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <script src="theme.js"></script>
+  <link rel="stylesheet" href="base.css">
+  <link rel="stylesheet" href="labeling.css">
+  <link rel="stylesheet" href="viewer.css">
+  <link rel="stylesheet" href="stacks-demo.css">
+</head>
+
+<!--
+  Standalone design mockup for "stacks" in the labeling workspace. It is NOT
+  wired into labeling.html, the database or demo mode: the images and the
+  stacks are generated in stacks-demo.js, and nothing can be labeled or saved.
+  The real stacks will come from a separate grouping script.
+-->
+<body class="stacks-demo">
+  <a class="skip-link" href="#image-grid">Skip to the image grid</a>
+
+  <header class="appbar">
+    <div class="appbar-inner">
+      <a class="brand" href="index.html" aria-label="Water Sample Image Catalog, home">
+        <img class="brand-mark" src="favicon.svg" alt="" width="40" height="40">
+        <span class="brand-text"><span class="brand-name">Water Sample</span><span class="brand-sub">Image Catalog</span></span>
+      </a>
+      <div class="appbar-actions">
+        <button type="button" class="icon-btn theme-toggle" data-theme-toggle aria-label="Switch to dark mode">
+          <svg class="icon ti-moon" aria-hidden="true"><use href="icons.svg#i-moon"/></svg>
+          <svg class="icon ti-sun" aria-hidden="true"><use href="icons.svg#i-sun"/></svg>
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <main id="main">
+    <div class="wrap">
+      <section class="banner page-head" aria-labelledby="page-title">
+        <div class="banner-inner">
+          <p class="eyebrow">Design mockup</p>
+          <h1 id="page-title">Image <em>stacks</em></h1>
+          <p class="lede">Images the grouping script thinks belong together are shown as one stacked card. Press Enter on a stack (or click it) to see every image in it. Sample images only, and nothing can be labeled here.</p>
+        </div>
+        <div class="waves" aria-hidden="true"></div>
+      </section>
+
+      <section class="card grid-panel" aria-label="Images">
+        <header class="grid-head">
+          <div class="grid-title">
+            <p class="eyebrow">Folder</p>
+            <h2 id="folder-title">Cooks_CR10.15.22_10x_AI1-pp</h2>
+            <p class="grid-sub" id="folder-sub"></p>
+          </div>
+        </header>
+
+        <div class="sticky-tools">
+          <div class="toolbar" role="toolbar" aria-label="Grid controls">
+            <div class="tool-group">
+              <label class="switch" for="stacks-toggle">
+                <input type="checkbox" id="stacks-toggle">
+                <span class="switch-track"></span>
+                <span>Show groups as stacks</span>
+              </label>
+            </div>
+            <div class="tool-group tool-end">
+              <div class="seg" id="size-seg" role="group" aria-label="Thumbnail size">
+                <button type="button" data-size="s" aria-pressed="false" aria-label="Small thumbnails">S</button>
+                <button type="button" data-size="m" aria-pressed="true" aria-label="Medium thumbnails">M</button>
+                <button type="button" data-size="l" aria-pressed="false" aria-label="Large thumbnails">L</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="status-line">
+          <span id="grid-summary" aria-live="polite"></span>
+          <span class="status-hint">Arrow keys move · Enter opens a stack, or the viewer for a single image</span>
+        </div>
+
+        <p class="visually-hidden" id="grid-help">Use the arrow keys to move between cards. Enter opens a stack to show all of its images, or opens a single image in the viewer.</p>
+        <div class="image-grid" id="image-grid" role="group" aria-label="Images" aria-describedby="grid-help"></div>
+      </section>
+    </div>
+  </main>
+
+  <script src="ui.js"></script>
+  <script src="labels.js"></script>
+  <script src="viewer.js"></script>
+  <script src="stacks-demo.js"></script>
+</body>
+
+</html>

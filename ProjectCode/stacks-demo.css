@@ -1,0 +1,89 @@
+/* Stacks mockup (stacks-demo.html). Builds on labeling.css's tiles. */
+
+.stacks-demo .grid-panel { margin-top: 1.5rem; }
+.stacks-demo .sticky-tools { margin-top: 1rem; }
+.stacks-demo .tile-main { cursor: pointer; }
+.stacks-demo .viewer-viewonly { display: none; }   /* no labeling in the mockup */
+
+/* Every grid entry reserves the same room for cards peeking out above it,
+   so stacks and single images line up in rows. */
+.image-grid.stacked { row-gap: 1.35rem; }
+.image-grid.stacked > .grid-item { padding-top: 0.85rem; }
+.grid-item { min-width: 0; }
+
+/* A stack: the cover tile with one or two cards behind it, each a little
+   narrower and higher, like a pile seen from the front. */
+.stack-card { position: relative; isolation: isolate; }
+.stack-card .stack-top { z-index: 2; }
+.stack-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  background: color-mix(in srgb, var(--surface) 82%, var(--text-muted));
+  border: 1.5px solid color-mix(in srgb, var(--border-strong) 70%, var(--text-muted));
+  border-radius: 16px;
+  box-shadow: var(--shadow-sm);
+  transform-origin: 50% 0;
+  transition: transform 0.35s var(--ease-spring), opacity 0.3s;
+  pointer-events: none;
+}
+.stack-layer.l1 { z-index: 1; transform: translateY(-0.45rem) scaleX(0.93); }
+.stack-layer.l2 { transform: translateY(-0.85rem) scaleX(0.86); background: color-mix(in srgb, var(--surface) 68%, var(--text-muted)); }
+
+/* Hover or keyboard focus fans the pile out a little. */
+.stack-card:hover .stack-layer.l1,
+.stack-card:focus-within .stack-layer.l1 { transform: translateY(-0.62rem) scaleX(0.94) rotate(-1.6deg); }
+.stack-card:hover .stack-layer.l2,
+.stack-card:focus-within .stack-layer.l2 { transform: translateY(-1.05rem) scaleX(0.88) rotate(2.2deg); }
+
+.stack-count {
+  position: absolute;
+  z-index: 2;
+  top: 0.45rem;
+  left: 0.45rem;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.28rem;
+  padding: 0.12rem 0.5rem 0.12rem 0.4rem;
+  font: 700 0.74rem var(--font-mono);
+  color: #fff;
+  background: rgba(8, 24, 28, 0.66);
+  border-radius: 999px;
+  pointer-events: none;
+  -webkit-backdrop-filter: blur(4px);
+  backdrop-filter: blur(4px);
+}
+.stack-count .icon { width: 0.9rem; height: 0.9rem; }
+.stack-card .tile-label { font-weight: 700; color: var(--text-2); }
+
+/* The pop-up */
+.stack-modal { width: min(68rem, 100%); display: flex; flex-direction: column; overflow: hidden; }
+.stack-modal .modal-header { align-items: flex-start; }
+.stack-modal .modal-header .eyebrow { margin: 0 0 0.15rem; }
+.stack-modal .modal-body { overflow: auto; min-height: 0; padding-top: 0.6rem; }
+.stack-hint { margin: 0; font-size: 0.86rem; color: var(--text-muted); }
+.stack-grid { padding: 0.25rem; }
+.stack-grid .tile-label .lab span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.stack-grid .tile.is-cover { border-color: var(--primary); }
+.stack-grid .tile.is-cover .tile-label { color: var(--primary-ink); font-weight: 700; }
+:root[data-theme="dark"] .stack-grid .tile.is-cover .tile-label { color: var(--primary); }
+
+@media (prefers-reduced-motion: reduce) {
+  .stack-layer { transition: none; }
+}
+
+/* Same look as base.css's .modal-backdrop, under its own name: viewer.js
+   ignores every key while a .modal-backdrop is open, and the viewer opens
+   on top of this pop-up. */
+.stack-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  display: grid;
+  place-items: center;
+  padding: 1rem;
+  background: var(--scrim);
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+  animation: fade-in 0.25s ease both;
+}
